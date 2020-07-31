@@ -1,0 +1,134 @@
+triggers:
+  - cron:
+      spec: H 23 * * 1
+      timezone: America/Chicago
+flows:
+   default:
+   - systemScript:
+       script: |
+        import com.fasterxml.jackson.core.type.TypeReference;
+        import com.fasterxml.jackson.databind.ObjectMapper;
+        import jenkins.model.Jenkins;
+        import java.io.File;
+        import java.util.Map;
+        import java.util.HashMap;
+        import javax.mail.internet.MimeMessage;
+        import javax.mail.internet.InternetAddress;
+        import javax.mail.Message;
+        import javax.mail.Message.RecipientType;
+        import javax.mail.Transport;
+        import javax.mail.Session;
+        import org.apache.commons.io.FileUtils;
+        import java.util.List;
+        import java.util.ArrayList;
+        import com.fasterxml.jackson.core.JsonParseException;
+        import java.io.IOException;
+        import java.util.concurrent.ConcurrentHashMap;
+        import groovy.transform.Field
+
+        File os = new File(Jenkins.get().getRootDir(), "jobs-to-be-deleted.txt")
+         String fileData = FileUtils.readFileToString(os);
+
+         @Field int MAX_DAYS=1000*60*60*24;
+         @Field int SIX_DAYS=42;
+         @Field String recipientsList;
+         @Field String jobName;
+         @Field String emailSubject
+
+         readJson(fileData)
+
+         def readJson(String fileData) throws JsonParseException, IOException {
+           ObjectMapper objectMapper = new ObjectMapper();
+           Map<String, List<String>> emailMap = new HashMap<String, List<String>>();
+           def ConcurrentHashMap<String, Map<String, String>> jobEmailMap = new ConcurrentHashMap();
+           jobEmailMap.putAll(objectMapper.readValue(fileData, new TypeReference<Map<String, Object>>(){}));
+           for(Map.Entry<String, Map<String, String>> entry : jobEmailMap.entrySet()) {
+             if(Jenkins.get().getItemByFullName(entry.getKey())!=null) {
+               jobName = entry.getKey();
+             emailMap.put(jobName, listEmailsTobeNotify(entry.getValue()));
+             }
+           }
+           for (Map.Entry<String, Map<String, String>> map : emailMap.entrySet()) {
+               List<String> emailList = map.getValue();
+               jobName =  map.getKey();
+               emailSubject = "ActionRequired: Looper Job Clean up Activity: Job Name: " + jobName;
+
+               // to remove emails with null and DL's
+
+               emailList.removeAll(Collections.singletonList(null));
+               emailList.removeIf{x->x.contains("@email.wal-mart.com")};
+
+               // Deleting orphan jobs and the jobs which crossed six weeks limit
+
+                  if(emailList.size() == 0 ) {
+                    Jenkins.get().getItemByFullName(map.getKey()).delete()
+                 }
+                 else{
+                     recipientsList = String.join(",", emailList);
+                     println("send email to-->" + recipientsList);
+                     println("JOb Name-->" + jobName);
+                     Jenkins.get().getItemByFullName(map.getKey()).disable()
+                     sendMail('smtp-gw1.wal-mart.com', 'Nivali.Basiboina@walmartlabs.com', recipientsList, emailSubject, Jenkins.get().getItemByFullName(jobName).getAbsoluteUrl(), "Shruthi.Gs@walmartlabs.com")
+
+
+                 }
+           }
+         }
+         // to retrive list of emails
+         def List<String> listEmailsTobeNotify(Map<String, String> dateEmailMap) {
+            List<String> emails = new ArrayList<>();
+            def duration = duration(dateEmailMap);
+            for(Map.Entry<String, String> entrySet : dateEmailMap.entrySet()) {
+            println( "duration. "+ duration)
+              if(duration<=SIX_DAYS){
+                if(!entrySet.getKey().equalsIgnoreCase("Date")){
+                emails.add(entrySet.getValue());
+                }
+              }
+            }
+            return emails;
+         }
+         // get the duration between the current date and file date from each job set
+         def duration(Map<String, String> dateSet) {
+           def inputFiledate =Long.parseLong(dateSet.get("Date"));
+           def duration = System.currentTimeMillis()-inputFiledate
+           duration = (int) (duration / MAX_DAYS);
+           return duration;
+         }
+         def sendMail(host, sender, receiver, subject,jobName,cc ) {
+               Properties props = System.getProperties()
+               props.put("mail.smtp.host", host)
+               props.put("mail.smtp.auth", "false");
+               props.put("mail.smtp.sendpartial", "true");
+               Session session = Session.getDefaultInstance(props, null)
+               MimeMessage message = new MimeMessage(session)
+               message.setFrom(new InternetAddress(sender))
+               InternetAddress[] recipientsList = InternetAddress.parse(receiver);
+               message.addRecipients(Message.RecipientType.TO, recipientsList)
+               message.addRecipient(Message.RecipientType.CC, new InternetAddress(cc))
+
+               message.setSubject(subject)
+                  String content = "ATTN: Looper User" +", \n" +
+                            "<br>" +
+                            "<br>" +
+                            "This is in regards to job clean up activity in Looper"   +
+                            "<br>" +
+                            "<br>" +
+                             "You are being notified here because you were identified as the git owner/colloborator for the following Looper job "   +
+                            "<br>" +
+                            "<br>" +
+                            "Job Url : ${jobName}" +
+                            "<br>" +
+                            "<br>" +
+                            "There is no activity seen for the above job which is outside of Looper retention policy. This email is to notify that we will be disabling the job immediately and if no further build is observed this job will be deleted in 4 weeks."
+                            "<br>" +
+                            "<br>" +
+                            "Thanks," + "<br>" +
+                            "<br>" +
+                            "Nivali"
+                  message.setContent(content, "text/html");
+                     message.setHeader("X-Priority", "1");
+                     println 'Sending mail to ' + recipientsList + '.'
+                     Transport.send(message)
+                     println 'Mail sent.'
+             }
